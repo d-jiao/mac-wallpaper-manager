@@ -1,4 +1,4 @@
-// Throwaway experiment: how does macOS expose folder-shuffle wallpapers?
+// Throwaway experiment #2: natural rotation, and whether "next" keeps the user's settings.
 import AppKit
 import Foundation
 
@@ -18,68 +18,76 @@ func sh(_ command: String) -> String {
     return String(decoding: data, as: UTF8.self)
 }
 
-func describe(_ value: Any, _ indent: String = "") -> String {
-    let next = indent + "  "
-    switch value {
-    case let dict as [String: Any]:
-        return "{\n" + dict.keys.sorted().map { "\(next)\($0) = \(describe(dict[$0]!, next))" }.joined(separator: "\n") + "\n\(indent)}"
-    case let array as [Any]:
-        return "[\n" + array.map { next + describe($0, next) }.joined(separator: "\n") + "\n\(indent)]"
-    case let data as Data:
-        if let inner = try? PropertyListSerialization.propertyList(from: data, format: nil) {
-            return "<data \(data.count)B plist> " + describe(inner, indent)
+let home = FileManager.default.homeDirectoryForCurrentUser
+let indexURL = home.appendingPathComponent("Library/Application Support/com.apple.wallpaper/Store/Index.plist")
+
+func loadIndex() -> [String: Any] {
+    let data = try! Data(contentsOf: indexURL)
+    return try! PropertyListSerialization.propertyList(from: data, format: nil) as! [String: Any]
+}
+
+/// Every shuffleFrequency id and placement id found anywhere in the store.
+func summarizeOptions(_ label: String) {
+    var found: [String] = []
+    func walk(_ v: Any, _ path: String) {
+        if let d = v as? [String: Any] {
+            for (k, x) in d {
+                if k == "EncodedOptionValues", let data = x as? Data,
+                   let inner = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                   let values = inner["values"] as? [String: Any] {
+                    let shuffle = (((values["shuffleFrequency"] as? [String: Any])?["picker"] as? [String: Any])?["_0"] as? [String: Any])?["id"]
+                    let placement = (((values["placement"] as? [String: Any])?["picker"] as? [String: Any])?["_0"] as? [String: Any])?["id"]
+                    found.append("\(path): shuffle=\(shuffle ?? "-") placement=\(placement ?? "-")")
+                } else if k == "Configuration", let data = x as? Data,
+                          let inner = try? PropertyListSerialization.propertyList(from: data, format: nil) {
+                    found.append("\(path): config=\(inner)".replacingOccurrences(of: "\n", with: " "))
+                } else {
+                    walk(x, path + "/" + k)
+                }
+            }
+        } else if let a = v as? [Any] {
+            for (i, x) in a.enumerated() { walk(x, path + "[\(i)]") }
         }
-        if let s = String(data: data, encoding: .utf8), s.count < 400 { return "<data utf8> \(s)" }
-        return "<data \(data.count)B> " + data.prefix(48).map { String(format: "%02x", $0) }.joined()
-    default:
-        return "\(value)"
     }
+    walk(loadIndex(), "")
+    print("\n=== Store options [\(label)]")
+    for line in found.sorted() { print("  " + line) }
 }
 
-let indexURL = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("Library/Application Support/com.apple.wallpaper/Store/Index.plist")
-
-func dumpIndex(_ label: String) {
-    print("\n=== Index.plist [\(label)]")
-    guard let data = try? Data(contentsOf: indexURL),
-          let obj = try? PropertyListSerialization.propertyList(from: data, format: nil)
-    else { print("unreadable"); return }
-    print(describe(obj))
-}
-
-func displayUUID(_ screen: NSScreen) -> String {
-    guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
-          let uuid = CGDisplayCreateUUIDFromDisplayID(n.uint32Value)?.takeRetainedValue()
-    else { return "?" }
-    return CFUUIDCreateString(nil, uuid) as String
-}
-
-func screens(_ label: String) {
-    print("\n=== Screens [\(label)]")
-    for s in NSScreen.screens {
-        print("screen \(s.localizedName) uuid=\(displayUUID(s)) frame=\(s.frame)")
-        print("  desktopImageURL: \(String(describing: NSWorkspace.shared.desktopImageURL(for: s)))")
-        print("  options: \(String(describing: NSWorkspace.shared.desktopImageOptions(for: s)))")
+/// Rewrites every shuffleFrequency id in the store.
+func setShuffleFrequency(_ id: String) {
+    func rewrite(_ v: Any) -> Any {
+        if var d = v as? [String: Any] {
+            for (k, x) in d {
+                if k == "EncodedOptionValues", let data = x as? Data,
+                   var inner = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                   var values = inner["values"] as? [String: Any] {
+                    values["shuffleFrequency"] = ["picker": ["_0": ["id": id]]]
+                    inner["values"] = values
+                    d[k] = try! PropertyListSerialization.data(fromPropertyList: inner, format: .binary, options: 0)
+                } else {
+                    d[k] = rewrite(x)
+                }
+            }
+            return d
+        }
+        if let a = v as? [Any] { return a.map(rewrite) }
+        return v
     }
+    let out = try! PropertyListSerialization.data(fromPropertyList: rewrite(loadIndex()), format: .binary, options: 0)
+    try! out.write(to: indexURL)
 }
 
-func openFiles(_ label: String) {
-    print("\n=== Wallpaper processes and open image files [\(label)]")
-    print(sh("ps -axo pid,user,comm | grep -i -E 'wallpaper|dock' | grep -v grep"))
-    print(sh("""
-    for p in $(pgrep -f -i wallpaper); do
-      echo "--- PID $p $(ps -o comm= -p $p)"
-      lsof -p $p 2>&1 | grep -i -E 'WPTest|\\.(png|jpe?g|heic|bmp|tiff?)' | awk '{print $4, $5, $NF}'
-    done
-    """))
+func openFiles() -> [String] {
+    sh("lsof -n -P -F n -c Wallpaper 2>/dev/null | grep '^n' | cut -c2- | grep WPTest")
+        .split(separator: "\n").map { URL(fileURLWithPath: String($0)).lastPathComponent }
 }
 
-// Distinct solid colors so a screenshot tells us which file is on screen.
 let colors: [(String, NSColor)] = [
-    ("red", .red), ("green", .green), ("blue", .blue),
-    ("yellow", .yellow), ("magenta", .magenta), ("cyan", .cyan),
+    ("red", .red), ("green", .green), ("blue", .blue), ("yellow", .yellow),
+    ("magenta", .magenta), ("cyan", .cyan), ("orange", .orange), ("purple", .purple),
 ]
-let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/WPTest", isDirectory: true)
+let folder = home.appendingPathComponent("Pictures/WPTest", isDirectory: true)
 try? FileManager.default.removeItem(at: folder)
 try! FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 for (name, color) in colors {
@@ -94,109 +102,69 @@ for (name, color) in colors {
     try! rep.representation(using: .png, properties: [:])!.write(to: folder.appendingPathComponent("\(name).png"))
 }
 
-let shots = URL(fileURLWithPath: "/tmp/probe-shots", isDirectory: true)
-try? FileManager.default.createDirectory(at: shots, withIntermediateDirectories: true)
-var shotIndex = 0
-func shot(_ label: String) {
-    shotIndex += 1
-    let path = shots.appendingPathComponent(String(format: "%02d-%@.png", shotIndex, label)).path
-    _ = sh("screencapture -x '\(path)'")
+func onScreen() -> String {
+    let path = "/tmp/probe-shot.png"
+    _ = sh("screencapture -x \(path)")
     guard let image = NSImage(contentsOfFile: path),
-          let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-        print("\n=== Screenshot [\(label)]: failed"); return
+          let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+          let c = NSBitmapImageRep(cgImage: cg).colorAt(x: cg.width / 4, y: cg.height / 2)?.usingColorSpace(.deviceRGB)
+    else { return "?" }
+    func d(_ x: NSColor) -> CGFloat {
+        guard let x = x.usingColorSpace(.deviceRGB) else { return 9 }
+        return pow(c.redComponent - x.redComponent, 2) + pow(c.greenComponent - x.greenComponent, 2) + pow(c.blueComponent - x.blueComponent, 2)
     }
-    let rep = NSBitmapImageRep(cgImage: cg)
-    // Sample bottom-left-ish area away from the menu bar and Dock.
-    let c = rep.colorAt(x: cg.width / 4, y: cg.height / 2)?.usingColorSpace(.deviceRGB)
-    let match = colors.min { a, b in
-        func d(_ x: NSColor) -> CGFloat {
-            guard let c, let x = x.usingColorSpace(.deviceRGB) else { return 9 }
-            return pow(c.redComponent - x.redComponent, 2) + pow(c.greenComponent - x.greenComponent, 2) + pow(c.blueComponent - x.blueComponent, 2)
-        }
-        return d(a.1) < d(b.1)
-    }
-    print("\n=== Screenshot [\(label)]: \(cg.width)x\(cg.height) sample=\(String(describing: c)) nearest=\(match?.0 ?? "?")")
+    return colors.min { d($0.1) < d($1.1) }!.0
 }
 
-func pause(_ s: UInt32) { sleep(s) }
-
-print(sh("sw_vers; whoami; echo; defaults read com.apple.wallpaper 2>&1 | head -50"))
-screens("initial")
-dumpIndex("initial")
-openFiles("initial")
-shot("initial")
-
-// Experiment 1: does setDesktopImageURL accept a folder?
-print("\n### Experiment 1: setDesktopImageURL(folder)")
-for s in NSScreen.screens {
-    do {
-        try NSWorkspace.shared.setDesktopImageURL(folder, for: s, options: [:])
-        print("set folder OK on \(s.localizedName)")
-    } catch {
-        print("set folder FAILED on \(s.localizedName): \(error)")
-    }
+func report(_ label: String) {
+    print(String(format: "[%@] %@  screen=%@  open=%@", Date().formatted(date: .omitted, time: .standard), label, onScreen(), openFiles().joined(separator: ",")))
 }
-pause(6)
-screens("after set folder")
-dumpIndex("after set folder")
-openFiles("after set folder")
-shot("after-set-folder")
-print(sh("osascript -e 'tell application \"System Events\" to get picture of every desktop' 2>&1"))
-print(sh("osascript -e 'tell application \"System Events\" to get picture rotation of every desktop' 2>&1"))
-print(sh("osascript -e 'tell application \"Finder\" to get POSIX path of (desktop picture as alias)' 2>&1"))
 
-// Experiment 2: set a single file, then check what the APIs report.
-print("\n### Experiment 2: setDesktopImageURL(file)")
-for s in NSScreen.screens {
-    try? NSWorkspace.shared.setDesktopImageURL(folder.appendingPathComponent("green.png"), for: s, options: [:])
-}
-pause(5)
-screens("after set green file")
-dumpIndex("after set green file")
-openFiles("after set green file")
-shot("after-set-green")
+let screen = NSScreen.screens[0]
 
-// Experiment 3: AppleScript folder rotation (older documented route).
-print("\n### Experiment 3: System Events picture rotation")
+print("### Shuffle frequency ids in system binaries")
 print(sh("""
-osascript -e 'tell application "System Events" to tell every desktop
-  set pictures folder to "\(folder.path)"
-  set picture rotation to 1
-  set random order to true
-  set change interval to 5.0
-end tell' 2>&1
+for f in /System/Library/ExtensionKit/Extensions/Wallpaper*.appex/Contents/MacOS/* /System/Library/CoreServices/WallpaperAgent.app/Contents/MacOS/WallpaperAgent; do
+  strings -a "$f" 2>/dev/null | grep -E '^shuffle_' ; done | sort -u
 """))
-pause(6)
-screens("after AppleScript rotation")
-dumpIndex("after AppleScript rotation")
-openFiles("after AppleScript rotation")
-shot("after-applescript-rotation")
+
+print("\n### Step 1: set folder")
+try! NSWorkspace.shared.setDesktopImageURL(folder, for: screen, options: [:])
+sleep(5)
+report("after set folder")
+summarizeOptions("after set folder")
+
+print("\n### Step 2: change shuffle frequency in the store to every minute, restart agent")
+setShuffleFrequency("shuffle_every_minute")
+sh("killall WallpaperAgent")
+sleep(8)
+summarizeOptions("after edit + restart")
+report("after restart")
+
+print("\n### Step 3: watch natural rotation for ~130 s")
+for i in 1...26 {
+    sleep(5)
+    report("t+\(i * 5)s")
+}
+
+print("\n### Step 4: 'next' by re-setting the folder with current options (5 times)")
+for i in 1...5 {
+    let options = NSWorkspace.shared.desktopImageOptions(for: screen) ?? [:]
+    try! NSWorkspace.shared.setDesktopImageURL(folder, for: screen, options: options)
+    sleep(2)
+    report("next #\(i) +2s")
+    sleep(5)
+    report("next #\(i) +7s")
+}
+summarizeOptions("after re-set folder")
+
+print("\n### Step 5: 'next' by restarting WallpaperAgent (3 times)")
 for i in 1...3 {
-    pause(6)
-    openFiles("rotation +\(i * 6)s")
-    shot("rotation-\(i)")
+    sh("killall WallpaperAgent")
+    sleep(4)
+    report("killall #\(i) +4s")
+    sleep(4)
+    report("killall #\(i) +8s")
 }
-
-// Experiment 4: re-apply the reported URL (claimed to advance the shuffle).
-print("\n### Experiment 4: re-apply current URL + options")
-for s in NSScreen.screens {
-    if let url = NSWorkspace.shared.desktopImageURL(for: s) {
-        let opts = NSWorkspace.shared.desktopImageOptions(for: s) ?? [:]
-        do { try NSWorkspace.shared.setDesktopImageURL(url, for: s, options: opts); print("re-applied \(url.path)") }
-        catch { print("re-apply failed: \(error)") }
-    }
-}
-pause(4)
-screens("after re-apply")
-openFiles("after re-apply")
-shot("after-reapply")
-
-// Experiment 5: restart WallpaperAgent.
-print("\n### Experiment 5: killall WallpaperAgent")
-print(sh("killall WallpaperAgent 2>&1; echo exit=$?"))
-pause(8)
-screens("after killall")
-dumpIndex("after killall")
-openFiles("after killall")
-shot("after-killall")
+summarizeOptions("after killall")
 print("\nDONE")

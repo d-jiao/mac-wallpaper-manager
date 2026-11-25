@@ -5,15 +5,8 @@ on:
 jobs:
   probe:
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Probe
-        run: swift probe/probe.swift 2>&1 | tee probe.log
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: probe
-          path: |
-            probe.log
-            /tmp/probe-shots/
+        run: swift probe/probe.swift 2>&1
