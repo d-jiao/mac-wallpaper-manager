@@ -130,43 +130,65 @@ final class WallpaperMonitor {
 
     // MARK: - Detection
 
+    /// Everything read from the system in one go. Built off the main thread.
+    struct Snapshot: Sendable {
+        let storeReadable: Bool
+        let wallpapers: [String: DisplayWallpaper]
+        let folders: [String: [URL]]
+        let openFiles: [String]
+    }
+
     func refresh() {
         guard !isRefreshing else { return }
         isRefreshing = true
         let displays = Self.displays()
+        let ids = displays.map(\.id)
 
         // Reading the store and listing open files takes a moment, so do it off the main thread.
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let store = WallpaperStore(contentsOf: WallpaperStore.defaultURL)
-            var wallpapers: [String: DisplayWallpaper] = [:]
-            var folders: [String: [URL]] = [:]
-            for display in displays {
-                wallpapers[display.id] = store?.wallpaper(forDisplay: display.id)
-                folders[display.id] = store?.folders(forDisplay: display.id) ?? []
-            }
-            let openFiles = folders.values.contains(where: { !$0.isEmpty }) ? WallpaperMonitor.openWallpaperFiles() : []
-
+            let snapshot = WallpaperMonitor.takeSnapshot(displayIDs: ids)
             Task { @MainActor [weak self] in
-                self?.finishRefresh(
-                    displays: displays, storeReadable: store != nil,
-                    wallpapers: wallpapers, folders: folders, openFiles: openFiles
-                )
+                self?.finishRefresh(displays: displays, snapshot: snapshot)
             }
         }
     }
 
-    private func finishRefresh(
-        displays: [(id: String, name: String)],
-        storeReadable: Bool,
-        wallpapers: [String: DisplayWallpaper],
-        folders: [String: [URL]],
-        openFiles: [String]
-    ) {
+    private func finishRefresh(displays: [(id: String, name: String)], snapshot: Snapshot) {
         isRefreshing = false
-        let picks = tracker.update(openFiles: openFiles, folders: folders)
+        let picks = tracker.update(openFiles: snapshot.openFiles, folders: snapshot.folders)
+        let newScreens = Self.makeScreens(displays: displays, snapshot: snapshot, picks: picks)
 
-        let newScreens = displays.map { display -> Screen in
-            let wallpaper = wallpapers[display.id]
+        let changed = storeReadable != snapshot.storeReadable
+            || newScreens.map(\.id) != screens.map(\.id)
+            || newScreens.map(\.current) != screens.map(\.current)
+            || newScreens.map(\.wallpaper) != screens.map(\.wallpaper)
+        storeReadable = snapshot.storeReadable
+        screens = newScreens
+        if changed { onChange?() }
+    }
+
+    nonisolated static func takeSnapshot(displayIDs: [String]) -> Snapshot {
+        let store = WallpaperStore(contentsOf: WallpaperStore.defaultURL)
+        var wallpapers: [String: DisplayWallpaper] = [:]
+        var folders: [String: [URL]] = [:]
+        for id in displayIDs {
+            wallpapers[id] = store?.wallpaper(forDisplay: id)
+            folders[id] = store?.folders(forDisplay: id) ?? []
+        }
+        let needsFiles = folders.values.contains(where: { !$0.isEmpty })
+        return Snapshot(
+            storeReadable: store != nil,
+            wallpapers: wallpapers,
+            folders: folders,
+            openFiles: needsFiles ? openWallpaperFiles() : []
+        )
+    }
+
+    private static func makeScreens(
+        displays: [(id: String, name: String)], snapshot: Snapshot, picks: [String: String]
+    ) -> [Screen] {
+        displays.map { display in
+            let wallpaper = snapshot.wallpapers[display.id]
             var current = picks[display.id].map { URL(fileURLWithPath: $0) }
             if current == nil, case .image(let url)? = wallpaper?.kind,
                FileManager.default.fileExists(atPath: url.path) {
@@ -174,14 +196,39 @@ final class WallpaperMonitor {
             }
             return Screen(id: display.id, name: display.name, wallpaper: wallpaper, current: current)
         }
+    }
 
-        let changed = self.storeReadable != storeReadable
-            || newScreens.map(\.id) != screens.map(\.id)
-            || newScreens.map(\.current) != screens.map(\.current)
-            || newScreens.map(\.wallpaper) != screens.map(\.wallpaper)
-        self.storeReadable = storeReadable
-        screens = newScreens
-        if changed { onChange?() }
+    /// What the app detects right now, as text. Used by `WallpaperManager --status` for troubleshooting.
+    static func statusReport() -> String {
+        let displays = displays()
+        let snapshot = takeSnapshot(displayIDs: displays.map(\.id))
+        var tracker = CurrentPictureTracker()
+        let picks = tracker.update(openFiles: snapshot.openFiles, folders: snapshot.folders)
+        let screens = makeScreens(displays: displays, snapshot: snapshot, picks: picks)
+
+        var lines = [
+            "macOS \(ProcessInfo.processInfo.operatingSystemVersionString)",
+            "Wallpaper settings: \(snapshot.storeReadable ? "read" : "NOT readable") (\(WallpaperStore.defaultURL.path))",
+        ]
+        for screen in screens {
+            lines.append("")
+            lines.append("Display: \(screen.name) [\(screen.id)]")
+            switch screen.wallpaper?.kind {
+            case .folder(let url)?:
+                lines.append("  Folder: \(url.path) (changes \(screen.wallpaper?.shuffleDescription ?? "on an unknown schedule"))")
+            case .image(let url)?:
+                lines.append("  Single picture: \(url.path)")
+            case .other(let provider)?:
+                lines.append("  Other wallpaper: \(provider)")
+            case nil:
+                lines.append("  Not found in settings")
+            }
+            lines.append("  Current picture: \(screen.current?.path ?? "not found")")
+        }
+        lines.append("")
+        lines.append("Files open in macOS's wallpaper processes:")
+        lines.append(contentsOf: snapshot.openFiles.map { "  \($0)" })
+        return lines.joined(separator: "\n")
     }
 
     private func screen(_ id: String) -> Screen? {
@@ -205,7 +252,7 @@ final class WallpaperMonitor {
     }
 
     /// Paths of files open in macOS's wallpaper processes, using `lsof`.
-    nonisolated private static func openWallpaperFiles() -> [String] {
+    nonisolated static func openWallpaperFiles() -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
         process.arguments = ["-n", "-P", "-w", "-F", "n", "-c", "WallpaperImage", "-c", "WallpaperAgent"]

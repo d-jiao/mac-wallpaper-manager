@@ -29,6 +29,25 @@ jobs:
           plutil -lint "build/Wallpaper Manager.app/Contents/Info.plist"
           codesign --verify --verbose "build/Wallpaper Manager.app"
 
+      # Sets up a shuffled folder on the runner's desktop and checks the app finds the picture on screen.
+      - name: End-to-end check against macOS's wallpaper shuffle
+        run: |
+          APP="build/Wallpaper Manager.app/Contents/MacOS/WallpaperManager"
+          DIR="$HOME/Pictures/WPTest"
+          mkdir -p "$DIR"
+          cp "/System/Library/Desktop Pictures/Solid Colors/"*.png "$DIR/"
+          swift scripts/ci/set-wallpaper-folder.swift "$DIR"
+          sleep 6
+          "$APP" --status | tee status.txt
+          grep -q "Folder: $DIR " status.txt
+          grep -q "Current picture: $DIR/" status.txt
+
+          echo "--- after Next (restart WallpaperAgent)"
+          killall WallpaperAgent
+          sleep 8
+          "$APP" --status | tee status-next.txt
+          grep -q "Current picture: $DIR/" status-next.txt
+
       - name: Zip app
         run: ditto -c -k --keepParent "build/Wallpaper Manager.app" build/WallpaperManager.zip
 
