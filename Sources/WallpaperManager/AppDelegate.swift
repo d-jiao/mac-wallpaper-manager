@@ -1,25 +1,15 @@
 import AppKit
 import ServiceManagement
+import WallpaperCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private static let intervalChoices: [(seconds: Int, title: String)] = [
-        (60, "1 Minute"),
-        (5 * 60, "5 Minutes"),
-        (10 * 60, "10 Minutes"),
-        (15 * 60, "15 Minutes"),
-        (30 * 60, "30 Minutes"),
-        (60 * 60, "1 Hour"),
-        (3 * 60 * 60, "3 Hours"),
-        (24 * 60 * 60, "1 Day"),
-    ]
-
-    private let controller: WallpaperController
+    private let monitor: WallpaperMonitor
     private var statusItem: NSStatusItem!
-    private var thumbnailCache: (path: String, image: NSImage?)?
+    private var thumbnailCache: [String: NSImage] = [:]
 
     override init() {
-        controller = WallpaperController()
+        monitor = WallpaperMonitor()
         super.init()
     }
 
@@ -37,25 +27,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
         statusItem.menu = menu
 
-        controller.onChange = { [weak self] in self?.wallpaperDidChange() }
-        controller.start()
+        monitor.onChange = { [weak self] in self?.wallpapersDidChange() }
+        monitor.start()
     }
 
-    private func wallpaperDidChange() {
-        let name = controller.current?.lastPathComponent
-        statusItem.button?.toolTip = name.map { "Wallpaper: \($0)" } ?? "Wallpaper Manager"
-        // Prepare the preview now so the menu opens instantly.
-        if let url = controller.current {
-            _ = thumbnail(for: url)
+    private func wallpapersDidChange() {
+        let names = monitor.screens.compactMap { $0.current?.lastPathComponent }
+        statusItem.button?.toolTip = names.isEmpty ? "Wallpaper Manager" : names.joined(separator: "\n")
+
+        // Prepare previews now so the menu opens instantly, and drop ones no longer needed.
+        let paths = Set(monitor.screens.compactMap { $0.current?.path })
+        thumbnailCache = thumbnailCache.filter { paths.contains($0.key) }
+        for screen in monitor.screens {
+            if let url = screen.current { _ = thumbnail(for: url) }
         }
     }
 
     private func thumbnail(for url: URL) -> NSImage? {
-        if let cache = thumbnailCache, cache.path == url.path {
-            return cache.image
-        }
+        if let cached = thumbnailCache[url.path] { return cached }
         let image = Thumbnail.make(for: url)
-        thumbnailCache = (url.path, image)
+        thumbnailCache[url.path] = image
         return image
     }
 
@@ -63,50 +54,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        controller.refreshImageCount()
 
-        // Current picture: preview and file name. Clicking it opens the picture.
-        if let url = controller.current {
-            let preview = NSMenuItem(title: url.lastPathComponent, action: #selector(openCurrent), keyEquivalent: "")
-            preview.target = self
-            preview.image = thumbnail(for: url)
-            preview.toolTip = url.path
-            menu.addItem(preview)
-        } else {
-            menu.addItem(infoItem(controller.folder == nil ? "No folder selected" : "No pictures found"))
+        if !monitor.storeReadable {
+            menu.addItem(infoItem("Couldn’t read the wallpaper settings"))
+            menu.addItem(infoItem("Check System Settings › Wallpaper"))
+            menu.addItem(.separator())
         }
-        if let status = statusText() {
-            menu.addItem(infoItem(status))
-        }
-        menu.addItem(.separator())
 
-        let hasCurrent = controller.current != nil
-        menu.addItem(actionItem("Next Wallpaper", #selector(nextWallpaper)))
-        menu.addItem(actionItem("Previous Wallpaper", #selector(previousWallpaper)))
-        menu.addItem(.separator())
-        menu.addItem(actionItem("Move to Trash", #selector(trashCurrent), enabled: hasCurrent))
-        menu.addItem(actionItem("Show in Finder", #selector(revealCurrent), enabled: hasCurrent))
-        menu.addItem(actionItem("Open", #selector(openCurrent), enabled: hasCurrent))
-        if let trashed = controller.lastTrashed {
+        for screen in monitor.screens {
+            addSection(for: screen, to: menu)
+            menu.addItem(.separator())
+        }
+
+        let canAdvance = monitor.screens.contains { $0.isRotatingFolder }
+        let next = actionItem("Next Picture on All Screens", #selector(nextPictures), enabled: canAdvance)
+        next.toolTip = "Shows a new picture from each screen’s folder. macOS can only do this for all screens at once."
+        menu.addItem(next)
+        if let trashed = monitor.lastTrashed {
             menu.addItem(actionItem("Put Back “\(trashed.original.lastPathComponent)”", #selector(restoreLastTrashed)))
         }
-        menu.addItem(.separator())
-
-        menu.addItem(actionItem(controller.isPaused ? "Resume Shuffling" : "Pause Shuffling", #selector(togglePause)))
-        menu.addItem(submenuItem("Change Picture Every", intervalMenu()))
-        menu.addItem(submenuItem("Picture Size", scalingMenu()))
-        menu.addItem(.separator())
-
-        if let folder = controller.folder {
-            let count = controller.imageCount
-            let item = infoItem("\(folder.lastPathComponent): \(count) picture\(count == 1 ? "" : "s")")
-            item.toolTip = folder.path
-            menu.addItem(item)
-        }
-        menu.addItem(actionItem("Choose Folder…", #selector(chooseFolder)))
-        let subfolders = actionItem("Include Subfolders", #selector(toggleSubfolders))
-        subfolders.state = controller.includeSubfolders ? .on : .off
-        menu.addItem(subfolders)
         menu.addItem(.separator())
 
         let login = actionItem("Open at Login", #selector(toggleOpenAtLogin))
@@ -117,40 +83,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quit)
     }
 
-    private func statusText() -> String? {
-        if controller.folder == nil { return "Choose a folder to get started" }
-        if controller.isPaused { return "Shuffling is paused" }
-        guard let date = controller.nextChangeDate else { return nil }
-        if date.timeIntervalSinceNow < 60 { return "Next picture in less than a minute" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return "Next picture \(formatter.localizedString(for: date, relativeTo: Date()))"
+    private func addSection(for screen: WallpaperMonitor.Screen, to menu: NSMenu) {
+        let folder = screen.wallpaper?.folder
+        let title = folder.map { "\(screen.name) · \($0.lastPathComponent)" } ?? screen.name
+        menu.addItem(headerItem(title, toolTip: folder?.path))
+
+        if let url = screen.current {
+            // Preview and file name; clicking opens the picture.
+            let preview = actionItem(url.lastPathComponent, #selector(openPicture(_:)), screen: screen)
+            preview.image = thumbnail(for: url)
+            preview.toolTip = url.path
+            menu.addItem(preview)
+        } else if folder != nil {
+            menu.addItem(infoItem("Finding the current picture…"))
+        } else {
+            menu.addItem(infoItem(description(of: screen.wallpaper)))
+        }
+
+        if screen.isRotatingFolder {
+            menu.addItem(actionItem("Move to Trash", #selector(trashPicture(_:)), screen: screen, enabled: screen.current != nil))
+        }
+        if screen.current != nil || folder != nil {
+            let title = screen.current != nil ? "Show in Finder" : "Show Folder in Finder"
+            menu.addItem(actionItem(title, #selector(revealPicture(_:)), screen: screen))
+        }
+        if let shuffle = screen.wallpaper?.shuffleDescription {
+            menu.addItem(infoItem("macOS changes it \(shuffle)"))
+        }
     }
 
-    private func intervalMenu() -> NSMenu {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        for choice in Self.intervalChoices {
-            let item = NSMenuItem(title: choice.title, action: #selector(selectInterval(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = choice.seconds
-            item.state = Int(controller.interval.rounded()) == choice.seconds ? .on : .off
-            menu.addItem(item)
+    private func description(of wallpaper: DisplayWallpaper?) -> String {
+        switch wallpaper?.kind {
+        case .image?: return "Picture file not found"
+        case .other?: return "Not shuffling a folder"
+        case .folder?, nil: return "Wallpaper not found in settings"
         }
-        return menu
     }
 
-    private func scalingMenu() -> NSMenu {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        for scaling in Scaling.allCases {
-            let item = NSMenuItem(title: scaling.title, action: #selector(selectScaling(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = scaling.rawValue
-            item.state = controller.scaling == scaling ? .on : .off
-            menu.addItem(item)
+    private func headerItem(_ title: String, toolTip: String?) -> NSMenuItem {
+        let item: NSMenuItem
+        if #available(macOS 14.0, *) {
+            item = NSMenuItem.sectionHeader(title: title)
+        } else {
+            item = infoItem(title)
         }
-        return menu
+        item.toolTip = toolTip
+        return item
     }
 
     private func infoItem(_ title: String) -> NSMenuItem {
@@ -159,39 +137,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    private func actionItem(_ title: String, _ action: Selector, enabled: Bool = true) -> NSMenuItem {
+    private func actionItem(
+        _ title: String,
+        _ action: Selector,
+        screen: WallpaperMonitor.Screen? = nil,
+        enabled: Bool = true
+    ) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
+        item.representedObject = screen?.id
         item.isEnabled = enabled
-        return item
-    }
-
-    private func submenuItem(_ title: String, _ submenu: NSMenu) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.submenu = submenu
         return item
     }
 
     // MARK: - Menu actions
 
-    @objc private func nextWallpaper() { controller.next() }
-    @objc private func previousWallpaper() { controller.previous() }
-    @objc private func trashCurrent() { controller.trashCurrent() }
-    @objc private func revealCurrent() { controller.revealCurrent() }
-    @objc private func openCurrent() { controller.openCurrent() }
-    @objc private func restoreLastTrashed() { controller.restoreLastTrashed() }
-    @objc private func togglePause() { controller.setPaused(!controller.isPaused) }
-    @objc private func chooseFolder() { controller.chooseFolder() }
-    @objc private func toggleSubfolders() { controller.setIncludeSubfolders(!controller.includeSubfolders) }
-
-    @objc private func selectInterval(_ sender: NSMenuItem) {
-        controller.setInterval(TimeInterval(sender.tag))
+    @objc private func trashPicture(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { monitor.trashCurrent(on: id) }
     }
 
-    @objc private func selectScaling(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let scaling = Scaling(rawValue: raw) else { return }
-        controller.setScaling(scaling)
+    @objc private func revealPicture(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { monitor.reveal(on: id) }
     }
+
+    @objc private func openPicture(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { monitor.open(on: id) }
+    }
+
+    @objc private func nextPictures() { monitor.nextPictures() }
+    @objc private func restoreLastTrashed() { monitor.restoreLastTrashed() }
 
     @objc private func toggleOpenAtLogin() {
         let service = SMAppService.mainApp
@@ -205,7 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         } catch {
-            controller.showAlert(
+            monitor.showAlert(
                 "Couldn’t change the login item.",
                 "\(error.localizedDescription)\n\nYou can also add Wallpaper Manager in System Settings › General › Login Items."
             )

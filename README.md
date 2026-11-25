@@ -1,29 +1,65 @@
 # Wallpaper Manager
 
-A small macOS menu bar app that shuffles your wallpaper from a folder and lets you act on the
-picture you're looking at:
+A small macOS menu bar app that works alongside the wallpaper shuffle in **System Settings ›
+Wallpaper**. It finds out which picture macOS is showing on each of your screens, so you can:
 
-- **Move to Trash**: get rid of a picture you don't like, and go straight to the next one
+- **Move to Trash**: get rid of a picture you don't like
 - **Show in Finder**: jump to the file so you can rotate, edit, rename, or move it
-- **Next / Previous Wallpaper**: skip ahead without waiting for the timer, or go back
+- **Next Picture**: skip ahead without waiting for the timer
 - **Put Back**: undo the last Move to Trash
 
-Click the menu bar icon (left or right click) to see a preview and the file name of the current
-wallpaper, plus all the actions.
+There's nothing to set up in the app. Keep choosing folders and intervals in System Settings as
+usual. With several displays, each shuffling its own folder, every screen gets its own section
+in the menu:
 
-## Why the app does the shuffling itself
+```
+Studio Display · Landscapes
+  [preview] hills.jpg
+  Move to Trash
+  Show in Finder
+  macOS changes it every 10 minutes
+DELL U2723QE · City Nights
+  [preview] tokyo.jpg
+  Move to Trash
+  Show in Finder
+  macOS changes it every 5 minutes
+─────────────
+Next Picture on All Screens
+Put Back “bridge.jpg”
+─────────────
+Open at Login
+Quit Wallpaper Manager
+```
 
-macOS's own "shuffle a folder" setting in System Settings › Wallpaper doesn't tell other apps
-which file it is showing, so there is no reliable way to trace the wallpaper back to its file.
-Wallpaper Manager therefore replaces that setting. It picks a random picture from your folder on
-a timer and sets it as the wallpaper, so it always knows which file is on screen.
+Click the menu bar icon (left or right click) to open it. Click a preview to open the picture,
+or hover over it to see the full path.
 
-The shuffle is "random without repeats": every picture is shown once before any picture is shown
-again, and new pictures you add to the folder are included automatically.
+## How it works, and its limits
+
+macOS has no official way for apps to ask which picture its shuffle is showing, so the app
+relies on two undocumented details, both observed on macOS 26:
+
+- **Folders:** System Settings stores each display's wallpaper in
+  `~/Library/Application Support/com.apple.wallpaper/Store/Index.plist`. The app reads the
+  folder and the shuffle interval for each display from there.
+- **Current picture:** macOS's wallpaper process keeps the picture on screen open. The app checks
+  every few seconds which file in each screen's folder that process has open. Right after a
+  change it can take a few seconds to catch up.
+
+**Next Picture changes all screens at once.** It works by restarting macOS's wallpaper agent
+(`killall WallpaperAgent`), which makes every screen pick a new picture from its folder and keeps
+all your System Settings options. The screens may flash briefly. macOS offers no way to advance
+just one screen without resetting that screen's shuffle settings.
+
+**Move to Trash also moves every screen to a new picture**, so the deleted one disappears
+right away.
+
+Because these details aren't documented, a future macOS update could change them. If the menu
+says "Finding the current picture…" for a long time, that's what happened. Please open an issue.
 
 ## Requirements
 
-- macOS 13 Ventura or later
+- macOS 13 Ventura or later (tested on macOS 26)
 - Xcode, or just the Xcode Command Line Tools (`xcode-select --install`)
 
 ## Install
@@ -34,70 +70,43 @@ cd mac-wallpaper-manager
 make install
 ```
 
-This builds the app, copies it to `/Applications/Wallpaper Manager.app`, and starts it. Run
-`make install` again to update after pulling changes.
-
-On first launch, the app asks you to choose your wallpaper folder. After that:
-
-1. Pick an interval under **Change Picture Every** (default: 10 minutes).
-2. Turn on **Open at Login** in the menu so it starts with your Mac.
-3. In **System Settings › Wallpaper**, turn on **Show on all Spaces** if you use several
-   desktops (Spaces). The app also re-applies the current picture when you switch Spaces.
-
-Setting a picture from the app replaces the folder rotation in System Settings, so the two
-don't compete. If the system's rotation ever comes back (for example on a Space the app hasn't
-visited yet), choose any single picture in System Settings › Wallpaper.
-
-## Menu
-
-- Preview and file name of the current wallpaper (click to open it; hover for the full path)
-- When the next change happens
-- Next / Previous Wallpaper
-- Move to Trash / Show in Finder / Open / Put Back
-- Pause or Resume Shuffling
-- Change Picture Every: 1 minute to 1 day
-- Picture Size: Fill, Fit, Stretch, Center
-- Choose Folder…, Include Subfolders
-- Open at Login, Quit
-
-The same picture is shown on all connected displays.
+This builds the app, copies it to `/Applications/Wallpaper Manager.app`, and starts it. Then
+choose **Open at Login** in the menu so it starts with your Mac. Run `make install` again to
+update after pulling changes.
 
 ## Notes
 
 - **Trash is the normal macOS Trash.** Trashed pictures can be recovered with **Put Back** in
   the menu, or from the Trash in Finder, until you empty it.
-- **Permissions:** if your folder is in Desktop, Documents, Downloads, iCloud Drive, or on an
-  external drive, macOS will ask once whether Wallpaper Manager may access it. Because the app
-  is signed locally (not with an Apple Developer ID), macOS may ask again after you rebuild it.
-- **Settings** are stored in `~/Library/Preferences/io.github.d-jiao.WallpaperManager.plist`.
-  To start over: quit the app, then run
-  `defaults delete io.github.d-jiao.WallpaperManager`.
+- **Permissions:** if a wallpaper folder is in Desktop, Documents, Downloads, iCloud Drive, or on
+  an external drive, macOS asks once whether Wallpaper Manager may access it. Because the app is
+  signed locally (not with an Apple Developer ID), macOS may ask again after you rebuild it.
+- Built-in wallpapers, Photos albums, and Aerials have no file to act on, so those screens only
+  show "Not shuffling a folder".
 
 ## Uninstall
+
+Turn off **Open at Login** first, then:
 
 ```bash
 make uninstall
 ```
 
-Turn off **Open at Login** first, or remove the app in System Settings › General › Login Items.
-
 ## Development
 
 ```bash
-make test   # unit tests for the shuffle and folder-scanning logic
+make test   # unit tests for reading the wallpaper settings and finding the current picture
 make run    # build and run without installing
 ```
 
 Project layout:
 
 ```
-Sources/WallpaperCore/      Shuffle order, history, folder scanning (pure Swift, unit tested)
-Sources/WallpaperManager/   Menu bar app: menu, wallpaper timer, Trash/Finder actions
+Sources/WallpaperCore/      Reads Index.plist, works out the current picture (pure Swift, unit tested)
+Sources/WallpaperManager/   Menu bar app: menu, polling, Trash/Finder actions
 Tests/WallpaperCoreTests/   Unit tests
 Resources/Info.plist        App bundle metadata
 scripts/build-app.sh        Builds the .app bundle
 ```
 
-GitHub Actions builds the app and runs the tests on macOS for every push to `main`. The built
-app is attached to each run as an artifact. Building it yourself with `make install` is simpler,
-because macOS blocks unsigned apps downloaded from the internet.
+GitHub Actions builds the app and runs the tests on macOS for every push to `main`.
