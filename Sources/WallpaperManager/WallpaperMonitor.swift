@@ -226,8 +226,10 @@ final class WallpaperMonitor {
             lines.append("  Current picture: \(screen.current?.path ?? "not found")")
         }
         lines.append("")
-        lines.append("Files open in macOS's wallpaper processes:")
-        lines.append(contentsOf: snapshot.openFiles.map { "  \($0)" })
+        lines.append("Pictures open in macOS's wallpaper processes:")
+        let pictureExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tif", "tiff", "gif", "bmp", "webp", "avif"]
+        let pictures = snapshot.openFiles.filter { pictureExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased()) }
+        lines.append(contentsOf: pictures.isEmpty ? ["  none"] : pictures.map { "  \($0)" })
         return lines.joined(separator: "\n")
     }
 
