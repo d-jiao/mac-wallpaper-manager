@@ -26,18 +26,26 @@ final class WallpaperMonitor {
     /// Called on the main thread when anything shown in the menu changed.
     var onChange: (() -> Void)?
 
+    /// While true (the menu is open), the monitor checks for changes more often.
+    var isWatchingClosely = false {
+        didSet {
+            if isWatchingClosely && !oldValue { refresh() }
+        }
+    }
+
     private var tracker = CurrentPictureTracker()
-    private var timer: Timer?
+    private var nextRefresh: Timer?
     private var isRefreshing = false
+    /// Check often until this time, because a change is in progress (one screen switched, others may
+    /// follow, and the previous file is still being released).
+    private var fastUntil = Date.distantPast
+
+    /// Seconds between checks. Each check runs `lsof` on macOS's wallpaper process.
+    private var pollInterval: TimeInterval {
+        isWatchingClosely || Date() < fastUntil ? 0.5 : 2
+    }
 
     func start() {
-        let timer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
-        timer.tolerance = 1
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-
         _ = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -76,12 +84,12 @@ final class WallpaperMonitor {
             return
         }
         // The new pictures take a moment to load.
-        for delay in [1.5, 3.5, 6.0] {
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                self?.refresh()
-            }
-        }
+        watchFast(for: 15)
+    }
+
+    private func watchFast(for seconds: TimeInterval) {
+        fastUntil = max(fastUntil, Date().addingTimeInterval(seconds))
+        refresh()
     }
 
     func restoreLastTrashed() {
@@ -141,6 +149,7 @@ final class WallpaperMonitor {
     func refresh() {
         guard !isRefreshing else { return }
         isRefreshing = true
+        nextRefresh?.invalidate()
         let displays = Self.displays()
         let ids = displays.map(\.id)
 
@@ -164,7 +173,24 @@ final class WallpaperMonitor {
             || newScreens.map(\.wallpaper) != screens.map(\.wallpaper)
         storeReadable = snapshot.storeReadable
         screens = newScreens
-        if changed { onChange?() }
+        if changed {
+            // Other screens often follow within seconds, and lingering files settle; keep watching.
+            fastUntil = max(fastUntil, Date().addingTimeInterval(10))
+            onChange?()
+        }
+        scheduleNextRefresh()
+    }
+
+    private func scheduleNextRefresh() {
+        nextRefresh?.invalidate()
+        let interval = pollInterval
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        timer.tolerance = interval * 0.2
+        // `.common` keeps checking while the menu is open.
+        RunLoop.main.add(timer, forMode: .common)
+        nextRefresh = timer
     }
 
     nonisolated static func takeSnapshot(displayIDs: [String]) -> Snapshot {
@@ -201,7 +227,10 @@ final class WallpaperMonitor {
     /// What the app detects right now, as text. Used by `WallpaperManager --status` for troubleshooting.
     static func statusReport() -> String {
         let displays = displays()
+        let started = Date()
         let snapshot = takeSnapshot(displayIDs: displays.map(\.id))
+        let elapsed = Date().timeIntervalSince(started)
+        let store = WallpaperStore(contentsOf: WallpaperStore.defaultURL)
         var tracker = CurrentPictureTracker()
         let picks = tracker.update(openFiles: snapshot.openFiles, folders: snapshot.folders)
         let screens = makeScreens(displays: displays, snapshot: snapshot, picks: picks)
@@ -224,12 +253,17 @@ final class WallpaperMonitor {
                 lines.append("  Not found in settings")
             }
             lines.append("  Current picture: \(screen.current?.path ?? "not found")")
+            let entries = store?.diagnostics(forDisplay: screen.id) ?? []
+            lines.append("  Settings entries (newest first):")
+            lines.append(contentsOf: entries.isEmpty ? ["    none"] : entries.map { "    \($0)" })
         }
         lines.append("")
         lines.append("Pictures open in macOS's wallpaper processes:")
         let pictureExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tif", "tiff", "gif", "bmp", "webp", "avif"]
         let pictures = snapshot.openFiles.filter { pictureExtensions.contains(URL(fileURLWithPath: $0).pathExtension.lowercased()) }
         lines.append(contentsOf: pictures.isEmpty ? ["  none"] : pictures.map { "  \($0)" })
+        lines.append("")
+        lines.append(String(format: "One check took %.0f ms", elapsed * 1000))
         return lines.joined(separator: "\n")
     }
 
@@ -253,11 +287,11 @@ final class WallpaperMonitor {
         return result
     }
 
-    /// Paths of files open in macOS's wallpaper processes, using `lsof`.
+    /// Paths of files open in macOS's wallpaper process (WallpaperImageExtension), using `lsof`.
     nonisolated static func openWallpaperFiles() -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        process.arguments = ["-n", "-P", "-w", "-F", "n", "-c", "WallpaperImage", "-c", "WallpaperAgent"]
+        process.arguments = ["-n", "-P", "-w", "-F", "n", "-c", "WallpaperImage"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice

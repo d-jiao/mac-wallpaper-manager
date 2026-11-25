@@ -83,7 +83,8 @@ final class WallpaperStoreTests: XCTestCase {
             "Spaces": ["SPACE-1": ["Displays": [displayA: ["Desktop": old]]]],
         ])
         XCTAssertEqual(store.wallpaper(forDisplay: displayA)?.folder?.path, "/Users/me/New")
-        XCTAssertEqual(Set(store.folders(forDisplay: displayA).map(\.path)), ["/Users/me/Old", "/Users/me/New"])
+        XCTAssertEqual(store.folders(forDisplay: displayA).map(\.path), ["/Users/me/New", "/Users/me/Old"], "current folder first")
+        XCTAssertEqual(store.diagnostics(forDisplay: displayA).count, 2)
     }
 
     func testSingleImage() {

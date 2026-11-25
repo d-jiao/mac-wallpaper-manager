@@ -62,15 +62,27 @@ public struct WallpaperStore {
     /// The wallpaper for a display. If the display has several entries (for example different Spaces),
     /// the most recently used one wins.
     public func wallpaper(forDisplay uuid: String) -> DisplayWallpaper? {
-        let entries = desktopEntries(forDisplay: uuid)
-        return entries.max { $0.lastUse < $1.lastUse }?.wallpaper
+        desktopEntries(forDisplay: uuid).first?.wallpaper
     }
 
-    /// Every folder configured for a display, across all Spaces. Used to match the picture files that
-    /// macOS has open, since the Space currently on screen isn't recorded in the store.
+    /// Every folder configured for a display, most recently used first. The first one is the
+    /// display's current folder; the others come from older or per-Space entries.
     public func folders(forDisplay uuid: String) -> [URL] {
         var seen = Set<String>()
         return desktopEntries(forDisplay: uuid).compactMap { $0.wallpaper.folder }.filter { seen.insert($0.path).inserted }
+    }
+
+    /// One line per store entry that applies to a display, for troubleshooting.
+    public func diagnostics(forDisplay uuid: String) -> [String] {
+        desktopEntries(forDisplay: uuid).map { entry in
+            let what: String
+            switch entry.wallpaper.kind {
+            case .folder(let url): what = "folder \(url.path)"
+            case .image(let url): what = "picture \(url.path)"
+            case .other(let provider): what = provider
+            }
+            return "\(entry.source): \(what), last used \(entry.lastUse)"
+        }
     }
 
     // MARK: - Parsing
@@ -78,27 +90,42 @@ public struct WallpaperStore {
     private struct Entry {
         let wallpaper: DisplayWallpaper
         let lastUse: Date
+        /// Where in the store the entry was found.
+        let source: String
     }
 
+    /// Entries for a display from the most specific level that has any, most recently used first.
     private func desktopEntries(forDisplay uuid: String) -> [Entry] {
-        let spaces = (root["Spaces"] as? [String: Any] ?? [:]).values.compactMap { $0 as? [String: Any] }
+        let spaces = root["Spaces"] as? [String: Any] ?? [:]
+        let spaceIDs = spaces.keys.sorted()
+        func desktop(_ value: Any?) -> Any? { (value as? [String: Any])?["Desktop"] }
+        func space(_ id: String) -> [String: Any] { spaces[id] as? [String: Any] ?? [:] }
+
+        typealias Candidate = (source: String, desktop: Any?)
+        let perDisplay: [Candidate] = spaceIDs.map { id -> Candidate in
+            (source: "Spaces/\(id)/Displays/\(uuid)", desktop: desktop((space(id)["Displays"] as? [String: Any])?[uuid]))
+        }
+        let perSpace: [Candidate] = spaceIDs.map { id -> Candidate in
+            (source: "Spaces/\(id)/Default", desktop: desktop(space(id)["Default"]))
+        }
+        let display: Candidate = (source: "Displays/\(uuid)", desktop: desktop((root["Displays"] as? [String: Any])?[uuid]))
+        let allDisplays: Candidate = (source: "AllSpacesAndDisplays", desktop: desktop(root["AllSpacesAndDisplays"]))
+        let systemDefault: Candidate = (source: "SystemDefault", desktop: desktop(root["SystemDefault"]))
 
         // Most specific first; fall back to broader settings only if a level has nothing usable.
-        let levels: [[Any?]] = [
-            spaces.map { (($0["Displays"] as? [String: Any])?[uuid] as? [String: Any])?["Desktop"] }
-                + [((root["Displays"] as? [String: Any])?[uuid] as? [String: Any])?["Desktop"]],
-            spaces.map { ($0["Default"] as? [String: Any])?["Desktop"] }
-                + [(root["AllSpacesAndDisplays"] as? [String: Any])?["Desktop"]],
-            [(root["SystemDefault"] as? [String: Any])?["Desktop"]],
-        ]
+        let levels: [[Candidate]] = [perDisplay + [display], perSpace + [allDisplays], [systemDefault]]
         for level in levels {
-            let entries = level.compactMap { $0.flatMap(Self.entry(fromDesktop:)) }
-            if !entries.isEmpty { return entries }
+            let entries = level.compactMap { item in
+                item.desktop.flatMap { Self.entry(fromDesktop: $0, source: item.source) }
+            }
+            if !entries.isEmpty {
+                return entries.sorted { $0.lastUse > $1.lastUse }
+            }
         }
         return []
     }
 
-    private static func entry(fromDesktop value: Any) -> Entry? {
+    private static func entry(fromDesktop value: Any, source: String) -> Entry? {
         guard let desktop = value as? [String: Any],
               let content = desktop["Content"] as? [String: Any],
               let choice = (content["Choices"] as? [Any])?.first as? [String: Any]
@@ -124,7 +151,7 @@ public struct WallpaperStore {
             shuffle = (content["EncodedOptionValues"] as? Data).flatMap(plist).flatMap(shuffleDescription(fromOptions:))
         }
         let lastUse = desktop["LastUse"] as? Date ?? desktop["LastSet"] as? Date ?? .distantPast
-        return Entry(wallpaper: DisplayWallpaper(kind: kind, shuffleDescription: shuffle), lastUse: lastUse)
+        return Entry(wallpaper: DisplayWallpaper(kind: kind, shuffleDescription: shuffle), lastUse: lastUse, source: source)
     }
 
     private static func isDirectory(_ url: URL) -> Bool {

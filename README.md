@@ -43,8 +43,9 @@ relies on two undocumented details, both observed on macOS 26:
   `~/Library/Application Support/com.apple.wallpaper/Store/Index.plist`. The app reads the
   folder and the shuffle interval for each display from there.
 - **Current picture:** macOS's wallpaper process keeps the picture on screen open. The app checks
-  every few seconds which file in each screen's folder that process has open. Right after a
-  change it can take a few seconds to catch up.
+  which file in each screen's folder that process has open: every 2 seconds, and every half second
+  while the menu is open or right after a picture changed. Each file is matched to the screen whose
+  current folder contains it, so two screens never show the same file in the menu.
 
 **Next Picture changes all screens at once.** It works by restarting macOS's wallpaper agent
 (`killall WallpaperAgent`), which makes every screen pick a new picture from its folder and keeps
@@ -54,8 +55,18 @@ just one screen without resetting that screen's shuffle settings.
 **Move to Trash also moves every screen to a new picture**, so the deleted one disappears
 right away.
 
-Because these details aren't documented, a future macOS update could change them. If the menu
-says "Finding the current picture…" for a long time, that's what happened. Please open an issue.
+Because these details aren't documented, a future macOS update could change them.
+
+## Troubleshooting
+
+If a screen shows the wrong picture, or "Finding the current picture…" for a long time, run:
+
+```bash
+"/Applications/Wallpaper Manager.app/Contents/MacOS/WallpaperManager" --status
+```
+
+It prints each display's folder, the picture the app detects, the wallpaper settings entries it
+found, and the picture files macOS has open. Include that output when you report a problem.
 
 ## Requirements
 

@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let monitor: WallpaperMonitor
     private var statusItem: NSStatusItem!
     private var thumbnailCache: [String: NSImage] = [:]
+    private var thumbnailsLoading = Set<String>()
+    private var isMenuOpen = false
 
     override init() {
         monitor = WallpaperMonitor()
@@ -41,18 +43,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for screen in monitor.screens {
             if let url = screen.current { _ = thumbnail(for: url) }
         }
+        rebuildMenuIfOpen()
     }
 
+    /// The cached preview, or nil while it is generated in the background (large photos can take a
+    /// moment to decode). The open menu is refreshed when it's ready.
     private func thumbnail(for url: URL) -> NSImage? {
-        if let cached = thumbnailCache[url.path] { return cached }
-        let image = Thumbnail.make(for: url)
-        thumbnailCache[url.path] = image
-        return image
+        let path = url.path
+        if let cached = thumbnailCache[path] { return cached }
+        guard !thumbnailsLoading.contains(path) else { return nil }
+        thumbnailsLoading.insert(path)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let image = Thumbnail.make(for: url)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.thumbnailsLoading.remove(path)
+                if let image { self.thumbnailCache[path] = image }
+                self.rebuildMenuIfOpen()
+            }
+        }
+        return nil
+    }
+
+    private func rebuildMenuIfOpen() {
+        if isMenuOpen, let menu = statusItem.menu {
+            rebuild(menu)
+        }
     }
 
     // MARK: - Menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        rebuild(menu)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        isMenuOpen = true
+        monitor.isWatchingClosely = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
+        monitor.isWatchingClosely = false
+    }
+
+    private func rebuild(_ menu: NSMenu) {
         menu.removeAllItems()
 
         if !monitor.storeReadable {
