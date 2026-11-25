@@ -130,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             preview.toolTip = url.path
             menu.addItem(preview)
         } else if folder != nil {
-            menu.addItem(infoItem("Finding the current picture…"))
+            menu.addItem(infoItem(monitor.isLoadingNewPictures ? "Loading the new picture…" : "Finding the current picture…"))
         } else {
             menu.addItem(infoItem(description(of: screen.wallpaper)))
         }

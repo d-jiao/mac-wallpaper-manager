@@ -43,8 +43,11 @@ relies on two undocumented details, both observed on macOS 26:
   `~/Library/Application Support/com.apple.wallpaper/Store/Index.plist`. The app reads the
   folder and the shuffle interval for each display from there.
 - **Current picture:** macOS's wallpaper process keeps the picture on screen open. The app checks
-  which file in each screen's folder that process has open: every 2 seconds, and every half second
-  while the menu is open or right after a picture changed. Each file is matched to the screen whose
+  which file in each screen's folder that process has open: every second, and four times a second
+  while the menu is open or right after a picture changed (each check takes about 10 ms of CPU;
+  checks pause while the displays sleep). macOS opens the new file the moment the picture starts
+  changing, so the menu keeps up within about a second. After Next or Move to Trash, macOS needs
+  about one more second to load the new pictures. Each file is matched to the screen whose
   current folder contains it, so two screens never show the same file in the menu.
 
 **Next Picture changes all screens at once.** It works by restarting macOS's wallpaper agent

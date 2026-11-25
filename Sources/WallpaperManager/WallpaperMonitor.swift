@@ -39,10 +39,19 @@ final class WallpaperMonitor {
     /// Check often until this time, because a change is in progress (one screen switched, others may
     /// follow, and the previous file is still being released).
     private var fastUntil = Date.distantPast
+    /// After Next or Trash, macOS needs about a second to open the new pictures.
+    private var loadingUntil = Date.distantPast
+    /// No checks while the displays sleep.
+    private var displaysAsleep = false
 
-    /// Seconds between checks. Each check runs `lsof` on macOS's wallpaper process.
+    /// True right after Next or Trash, while macOS is still loading the new pictures.
+    var isLoadingNewPictures: Bool { Date() < loadingUntil }
+
+    /// Seconds between checks. Each check runs `lsof` on macOS's wallpaper process (about 10 ms of CPU).
+    /// macOS opens a new picture's file as soon as it starts showing it, so checking often is what
+    /// makes the menu keep up.
     private var pollInterval: TimeInterval {
-        isWatchingClosely || Date() < fastUntil ? 0.5 : 2
+        isWatchingClosely || Date() < fastUntil ? 0.25 : 1
     }
 
     func start() {
@@ -50,6 +59,19 @@ final class WallpaperMonitor {
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        _ = workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.displaysAsleep = true
+                self?.nextRefresh?.invalidate()
+            }
+        }
+        _ = workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.displaysAsleep = false
+                self?.refresh()
+            }
         }
         refresh()
     }
@@ -84,6 +106,7 @@ final class WallpaperMonitor {
             return
         }
         // The new pictures take a moment to load.
+        loadingUntil = Date().addingTimeInterval(8)
         watchFast(for: 15)
     }
 
@@ -183,6 +206,7 @@ final class WallpaperMonitor {
 
     private func scheduleNextRefresh() {
         nextRefresh?.invalidate()
+        guard !displaysAsleep else { return }
         let interval = pollInterval
         let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
