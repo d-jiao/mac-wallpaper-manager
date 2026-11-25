@@ -1,0 +1,38 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  pull_request:
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Test
+        run: swift test
+
+      - name: Build app bundle
+        run: ./scripts/build-app.sh
+
+      - name: Check bundle
+        run: |
+          plutil -lint "build/Wallpaper Manager.app/Contents/Info.plist"
+          codesign --verify --verbose "build/Wallpaper Manager.app"
+
+      - name: Zip app
+        run: ditto -c -k --keepParent "build/Wallpaper Manager.app" build/WallpaperManager.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WallpaperManager
+          path: build/WallpaperManager.zip
