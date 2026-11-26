@@ -1,6 +1,6 @@
-// Temporary CI exploration: what can talk to macOS's wallpaper system per display?
+// Temporary CI exploration #2: wallpaper App Intents, controls, and the "skip" signal.
+import AppKit
 import Foundation
-import ObjectiveC
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
@@ -8,7 +8,7 @@ setvbuf(stdout, nil, _IOLBF, 0)
 func sh(_ command: String) -> String {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-    p.arguments = ["-c", command]
+    p.arguments = ["-c", "setopt nullglob; " + command]
     let pipe = Pipe()
     p.standardOutput = pipe
     p.standardError = pipe
@@ -18,72 +18,79 @@ func sh(_ command: String) -> String {
     return String(decoding: data, as: UTF8.self)
 }
 
-print("### Wallpaper frameworks")
-let frameworks = sh("ls -d /System/Library/PrivateFrameworks/*allpaper*.framework /System/Library/Frameworks/*allpaper*.framework 2>/dev/null")
-    .split(separator: "\n").map(String.init)
-print(frameworks.joined(separator: "\n"))
+let agent = "/System/Library/CoreServices/WallpaperAgent.app"
 
-print("\n### AppKit desktop image exports")
-print(sh("dyld_info -exports /System/Library/Frameworks/AppKit.framework/AppKit 2>&1 | grep -i -E 'desktopimage|wallpaper' | head -40"))
+print("### Private wallpaper frameworks")
+print(sh("ls -d /System/Library/PrivateFrameworks/*allpaper* /System/Library/PrivateFrameworks/*EyeCandy* 2>&1"))
 
-let interesting = ["shuffle", "next", "advance", "rotate", "refresh", "choice", "display", "frequency", "option", "store", "set", "client", "update"]
-
-for framework in frameworks {
-    let name = URL(fileURLWithPath: framework).deletingPathExtension().lastPathComponent
-    let binary = "\(framework)/\(name)"
-    print("\n### \(name)")
-    print("exports (filtered):")
-    print(sh("dyld_info -exports '\(binary)' 2>&1 | grep -i -E 'shuffle|advance|nextwallpaper|refresh|frequency' | head -40"))
-    guard dlopen(binary, RTLD_NOW) != nil else {
-        print("dlopen failed: \(String(cString: dlerror()))")
-        continue
-    }
-    var count: UInt32 = 0
-    guard let names = objc_copyClassNamesForImage(binary, &count) else { print("no ObjC classes"); continue }
-    print("ObjC classes: \(count)")
-    for i in 0..<Int(count) {
-        let className = String(cString: names[i])
-        guard let cls = objc_getClass(names[i]) as? AnyClass else { continue }
-        var methods: [String] = []
-        for (target, prefix) in [(cls as AnyClass?, "-"), (object_getClass(cls), "+")] {
-            var n: UInt32 = 0
-            if let list = class_copyMethodList(target, &n) {
-                for j in 0..<Int(n) {
-                    let sel = NSStringFromSelector(method_getName(list[j]))
-                    if interesting.contains(where: { sel.lowercased().contains($0) }) { methods.append(prefix + sel) }
-                }
-                free(list)
+print("\n### App Intents metadata in the agent's extensions")
+let metadataFiles = sh("find '\(agent)' -name 'extract.actionsdata' 2>/dev/null").split(separator: "\n").map(String.init)
+for file in metadataFiles {
+    print("--- \(file)")
+    guard let data = FileManager.default.contents(atPath: file),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { print("unreadable"); continue }
+    if let actions = json["actions"] as? [String: Any] {
+        for (id, value) in actions.sorted(by: { $0.key < $1.key }) {
+            let action = value as? [String: Any] ?? [:]
+            let title = ((action["title"] as? [String: Any])?["key"] as? String) ?? "\(action["title"] ?? "")"
+            let params = (action["parameters"] as? [[String: Any]] ?? []).map { p -> String in
+                let name = p["name"] as? String ?? "?"
+                let type = (p["valueType"] as? [String: Any]).map { "\($0)".replacingOccurrences(of: "\n", with: " ") } ?? ""
+                return "\(name):\(type.prefix(120))"
             }
-        }
-        if !methods.isEmpty || className.lowercased().contains("client") || className.lowercased().contains("shuffle") {
-            print("  \(className): \(methods.prefix(40).joined(separator: " "))")
+            print("  action \(id) title=\(title) openApp=\(action["openAppWhenRun"] ?? "-") params=\(params)")
         }
     }
-    free(names)
-}
-
-print("\n### ObjC protocols mentioning wallpaper")
-var protoCount: UInt32 = 0
-if let protos = objc_copyProtocolList(&protoCount) {
-    for i in 0..<Int(protoCount) {
-        let name = String(cString: protocol_getName(protos[i]))
-        guard name.lowercased().contains("wallpaper") else { continue }
-        var methods: [String] = []
-        for required in [true, false] {
-            var n: UInt32 = 0
-            if let list = protocol_copyMethodDescriptionList(protos[i], required, true, &n) {
-                for j in 0..<Int(n) { if let s = list[j].name { methods.append(NSStringFromSelector(s)) } }
-                free(list)
-            }
-        }
-        print("  \(name): \(methods.joined(separator: " "))")
+    if let entities = json["entities"] as? [String: Any] { print("  entities: \(entities.keys.sorted())") }
+    if let enums = json["enums"] as? [[String: Any]] {
+        for e in enums { print("  enum \(e["identifier"] ?? "?"): \((e["cases"] as? [[String: Any]] ?? []).compactMap { $0["identifier"] as? String })") }
     }
 }
 
-print("\n### WallpaperAgent strings")
-print(sh("strings -a /System/Library/CoreServices/WallpaperAgent.app/Contents/MacOS/WallpaperAgent | grep -i -E 'shuffle|notif|com\\.apple\\.wallpaper|xpc|mach' | sort -u | head -60"))
+print("\n### Extension bundles")
+print(sh("for p in '\(agent)'/Contents/PlugIns/*.appex; do echo \"$p\"; /usr/libexec/PlistBuddy -c 'Print :NSExtension' \"$p/Contents/Info.plist\" 2>&1 | head -20; /usr/libexec/PlistBuddy -c 'Print :EXAppExtensionAttributes' \"$p/Contents/Info.plist\" 2>&1 | head -10; done"))
 
-print("\n### WallpaperAgent launchd service")
-print(sh("launchctl print gui/$(id -u)/com.apple.wallpaper.agent 2>&1 | sed -n '/endpoints/,/}/p;/program/p' | head -30"))
-print(sh("ls /System/Library/CoreServices/WallpaperAgent.app/Contents/ /System/Library/CoreServices/WallpaperAgent.app/Contents/* 2>&1 | head -40"))
+print("\n### Strings mentioning skip / next / shuffle")
+for binary in sh("ls '\(agent)'/Contents/MacOS/* '\(agent)'/Contents/PlugIns/*.appex/Contents/MacOS/*").split(separator: "\n") {
+    print("--- \(binary)")
+    print(sh("strings -a '\(binary)' | grep -i -E 'skip|nextwall|next ?wallpaper|shuffle|advance' | sort -u | head -40"))
+}
+
+// Experiment: send the "skip" signal in a few ways and watch the screen.
+let colors: [(String, NSColor)] = [("red", .red), ("green", .green), ("blue", .blue), ("yellow", .yellow), ("magenta", .magenta), ("cyan", .cyan)]
+let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Skip", isDirectory: true)
+try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+for (name, color) in colors {
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 640, pixelsHigh: 400, bitsPerSample: 8, samplesPerPixel: 4,
+                               hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    color.setFill()
+    NSRect(x: 0, y: 0, width: 640, height: 400).fill()
+    NSGraphicsContext.restoreGraphicsState()
+    try! rep.representation(using: .png, properties: [:])!.write(to: folder.appendingPathComponent("\(name).png"))
+}
+func openFiles() -> String {
+    sh("lsof -n -P -w -F n -c WallpaperImage | grep '^n' | cut -c2- | grep /Skip/ | sed 's#.*/##' | tr '\\n' ' '")
+}
+func watch(_ label: String, seconds: Double) {
+    print("\n### \(label)")
+    let start = Date()
+    var last = ""
+    while Date().timeIntervalSince(start) < seconds {
+        let line = openFiles()
+        if line != last { print(String(format: "  %5.2fs open=%@", Date().timeIntervalSince(start), line)); last = line }
+        usleep(250_000)
+    }
+}
+try! NSWorkspace.shared.setDesktopImageURL(folder, for: NSScreen.screens[0], options: [:])
+watch("set folder", seconds: 5)
+
+for name in ["com.apple.wallpaper.skip", "com.apple.wallpaper.agent.controls"] {
+    print(sh("notifyutil -p \(name); echo notify exit=$?"))
+    watch("Darwin notification \(name)", seconds: 5)
+    DistributedNotificationCenter.default().postNotificationName(NSNotification.Name(name), object: nil, userInfo: nil, deliverImmediately: true)
+    watch("distributed notification \(name)", seconds: 5)
+}
+print(sh("shortcuts list 2>&1 | head -5; echo shortcuts exit=$?"))
 print("\nDONE")
