@@ -51,10 +51,6 @@ jobs:
           echo "--- CPU cost of one open-files check"
           for i in 1 2 3; do /usr/bin/time -p lsof -n -P -w -F n -c WallpaperImage > /dev/null; done
 
-      # Temporary: does macOS keep shuffling after the picture on screen is trashed?
-      - name: Trash rotation check
-        run: swift scripts/ci/trash-rotation-check.swift
-
       - name: Zip app
         run: ditto -c -k --keepParent "build/Wallpaper Manager.app" build/WallpaperManager.zip
 
