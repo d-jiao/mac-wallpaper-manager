@@ -23,6 +23,8 @@ final class WallpaperMonitor {
     private(set) var storeReadable = true
     /// The most recently trashed picture, so it can be put back.
     private(set) var lastTrashed: (original: URL, inTrash: URL)?
+    /// Displays whose picture was just trashed (display ID to file name), until macOS shows the next one.
+    private(set) var trashedOnScreen: [String: String] = [:]
     /// Called on the main thread when anything shown in the menu changed.
     var onChange: (() -> Void)?
 
@@ -78,7 +80,9 @@ final class WallpaperMonitor {
 
     // MARK: - Actions
 
-    /// Moves a display's current picture to the Trash, then shows new pictures.
+    /// Moves a display's current picture to the Trash. Nothing else changes: macOS keeps showing the
+    /// picture until that display's next scheduled change, and other displays aren't touched.
+    /// (macOS can't advance one display on its own without resetting its interval to 30 minutes.)
     func trashCurrent(on screenID: String) {
         guard let url = screen(screenID)?.current else {
             NSSound.beep()
@@ -92,7 +96,9 @@ final class WallpaperMonitor {
             showAlert("Couldn’t move “\(url.lastPathComponent)” to the Trash.", error.localizedDescription)
             return
         }
-        nextPictures()
+        trashedOnScreen[screenID] = url.lastPathComponent
+        onChange?()
+        refresh()
     }
 
     /// Makes macOS pick new pictures now by restarting its wallpaper agent (launchd starts it again
@@ -196,7 +202,11 @@ final class WallpaperMonitor {
             || newScreens.map(\.wallpaper) != screens.map(\.wallpaper)
         storeReadable = snapshot.storeReadable
         screens = newScreens
-        if changed {
+        // A display that shows a picture again has moved on from the trashed one.
+        let stillWaiting = trashedOnScreen.filter { id, _ in newScreens.first { $0.id == id }?.current == nil }
+        let trashChanged = stillWaiting.count != trashedOnScreen.count
+        trashedOnScreen = stillWaiting
+        if changed || trashChanged {
             // Other screens often follow within seconds, and lingering files settle; keep watching.
             fastUntil = max(fastUntil, Date().addingTimeInterval(10))
             onChange?()
@@ -239,7 +249,9 @@ final class WallpaperMonitor {
     ) -> [Screen] {
         displays.map { display in
             let wallpaper = snapshot.wallpapers[display.id]
+            // A check that started just before a Move to Trash can still report the old path.
             var current = picks[display.id].map { URL(fileURLWithPath: $0) }
+                .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
             if current == nil, case .image(let url)? = wallpaper?.kind,
                FileManager.default.fileExists(atPath: url.path) {
                 current = url

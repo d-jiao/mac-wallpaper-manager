@@ -129,6 +129,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             preview.image = thumbnail(for: url)
             preview.toolTip = url.path
             menu.addItem(preview)
+        } else if let trashed = monitor.trashedOnScreen[screen.id] {
+            menu.addItem(infoItem("Moved “\(trashed)” to the Trash"))
+            menu.addItem(infoItem("It stays on screen until macOS’s next change"))
         } else if folder != nil {
             menu.addItem(infoItem(monitor.isLoadingNewPictures ? "Loading the new picture…" : "Finding the current picture…"))
         } else {

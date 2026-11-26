@@ -3,7 +3,7 @@
 A small macOS menu bar app that works alongside the wallpaper shuffle in **System Settings ›
 Wallpaper**. It finds out which picture macOS is showing on each of your screens, so you can:
 
-- **Move to Trash**: get rid of a picture you don't like
+- **Move to Trash**: get rid of a picture you don't like (only that screen's file; nothing else changes)
 - **Show in Finder**: jump to the file so you can rotate, edit, rename, or move it
 - **Next Picture**: skip ahead without waiting for the timer
 - **Put Back**: undo the last Move to Trash
@@ -55,8 +55,15 @@ relies on two undocumented details, both observed on macOS 26:
 all your System Settings options. The screens may flash briefly. macOS offers no way to advance
 just one screen without resetting that screen's shuffle settings.
 
-**Move to Trash also moves every screen to a new picture**, so the deleted one disappears
-right away.
+**Move to Trash only deletes the file.** Your other screen isn't touched, and every screen keeps
+its own countdown. The deleted picture stays on its screen until macOS's next scheduled change
+for that screen (within a minute if it changes every minute). To replace it right away, use
+**Next Picture on All Screens**. As above, that gives every screen a new picture.
+
+Tested on macOS 26: changing one screen's folder through the official API resets that screen's
+interval to 30 minutes, and edits to Index.plist only take effect when the wallpaper agent
+restarts (which changes every screen). So there's no way to give one screen a new picture early
+without affecting the others or its settings.
 
 Because these details aren't documented, a future macOS update could change them.
 
